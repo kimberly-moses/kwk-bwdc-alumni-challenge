@@ -7,7 +7,7 @@ import urllib
 import zipcodes
 from config import YELP_API_KEY, SQLALCHEMY_DATABASE_URI
 from sqlalchemy import create_engine, Column, Integer, String, MetaData, Table
-import sqlite3 
+import sqlite3
 
 DESTINATION_SCHEMA = "yelp"
 DESTINATION_TABLE = "business_search_results"
@@ -19,19 +19,40 @@ HEADERS = {
 JSON_COLUMNS = ["categories", "coordinates", "transactions", "location"]
 
 
-# class DummyConnection:
-#   """
-#   Placeholder to serve as a data store that pandas will read/write
-#   data from/to -- could be SQLAlchemy, SQLite, etc.
-#   Update the TODOs below depending on your implementation
-#   """
-#   def __init__(
-#     self,
-#     connection,
-#     creds,
-#   ):
-#     self.connection = connection
-#     self.creds = creds
+# create a table to store search state
+def create_state_table(connection):
+    cursor = connection.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS search_state (
+            id INTEGER PRIMARY KEY,
+            location TEXT,
+            term TEXT,
+            offset INTEGER,
+            is_complete INTEGER
+        )
+    ''')
+    connection.commit()
+
+def save_search_state(connection, location, term, offset, is_complete):
+    cursor = connection.cursor()
+    cursor.execute('''
+        REPLACE INTO search_state (location, term, offset, is_complete)
+        VALUES (?, ?, ?, ?)
+    ''', (location, term, offset, is_complete))
+    connection.commit()
+
+def load_search_state(connection, location, term):
+    cursor = connection.cursor()
+    cursor.execute('''
+        SELECT offset, is_complete FROM search_state
+        WHERE location = ? AND term = ?
+    ''', (location, term))
+    result = cursor.fetchone()
+    if result:
+        offset, is_complete = result
+        return {'offset': offset, 'is_complete': bool(is_complete)}
+    else:
+        return None
 
 
 def yelp_search_url(location: str, term: str = None) -> str:
@@ -82,18 +103,18 @@ def yelp_city_locations(city: str, term: str = None) -> tuple[list, int]:
   return locations, expected_results
 
 
-def yelp_location_search(location: str, term = None) -> pandas.DataFrame:
+def yelp_location_search(location: str, term = None, offset = 0) -> pandas.DataFrame:
   """
   Get as many results as possible for a Yelp search on `location`
   and optional `term`, paginating up to the the 1000-result limit
   """
-  MAX_LIMIT = 5 #50
-  MAX_RESULTS = 5 #50 # 1000
+  MAX_LIMIT = 50
+  MAX_RESULTS = 1000
 
   search_url = yelp_search_url(location=location, term=term)
 
   page_dfs = []
-  running_count = 0
+  running_count = offset
   limit = MAX_LIMIT
   total_count = running_count + limit
 
@@ -162,7 +183,8 @@ def yelp_location_search(location: str, term = None) -> pandas.DataFrame:
   # search_results['_term'] = term if term else ''
   # search_results['_is_complete'] = str(is_complete)
 
-  return search_results
+  return search_results, total_count
+
 
 def columns_with_dicts(df):
     cols_with_dicts = []
@@ -190,14 +212,8 @@ if __name__ == '__main__':
 
   cities = " ".join(args.cities).split(";")
 
-  # TODO: implement a real connection 
-  # dummy_con = DummyConnection(connection='foo', creds='bar')
-
-  # engine = create_engine(SQLALCHEMY_DATABASE_URI)
-  # connection = engine.connect()
-
-  # connection = sqlite3.connect(SQLALCHEMY_DATABASE_URI)
   connection = sqlite3.connect('yelp.db')
+  create_state_table(connection)
 
 
   for city in cities:
@@ -209,8 +225,14 @@ if __name__ == '__main__':
       for location in locations:
         term_filter = term if term else ''
 
+        # Load previous search state
+        search_state = load_search_state(connection, location, term_filter)
+        if search_state:
+          offset = search_state['offset']
+        else:
+          offset = 0
+
         # Check whether we've already loaded results
-        # TODO: implement according to your connection 
         try:
           loaded_data = pandas.read_sql(
             sql=f"""
@@ -225,29 +247,41 @@ if __name__ == '__main__':
           loaded_data = pandas.DataFrame()
 
         if loaded_data.empty:
-          yelp_data = yelp_location_search(location=location, term=term)
 
+          # Fetch results from the API using the current offset
+          yelp_data, total_count = yelp_location_search(location=location, term=term, offset=offset)
+          
           print(yelp_data)
 
           cols_with_dicts = columns_with_dicts(yelp_data)
 
-          # Inside the main loop where you fetch Yelp data and before writing to the database
           for column in cols_with_dicts:
-              yelp_data[column] = yelp_data[column].map(json.dumps).astype('string')
+            yelp_data[column] = yelp_data[column].map(json.dumps).astype('string')
 
 
           # Write the results to the data store
-          # TODO: implement according to your connection
           try:
             yelp_data.to_sql(
               name=DESTINATION_TABLE,
               con=connection,
               schema=DESTINATION_SCHEMA,
               if_exists='append',
-              # index = False  # Don't write DataFrame index to SQL table
+              index = False
             )
 
             connection.commit()
+
+            # Update offset and is_complete based on the results
+            is_complete = False
+            
+            if offset + len(yelp_data) >= total_count: #len(yelp_data) == 0:
+              is_complete = True
+            else:
+              is_complete = False
+              offset += len(yelp_data)
+
+            # Save the updated search state
+            save_search_state(connection, location, term_filter, offset, is_complete)
           except Exception as e:
             print(e)
 
