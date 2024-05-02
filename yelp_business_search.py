@@ -20,26 +20,48 @@ JSON_COLUMNS = ["categories", "coordinates", "transactions", "location"]
 
 
 # create a table to store search state
+# def create_state_table(connection):
+#     cursor = connection.cursor()
+#     cursor.execute('''
+#         CREATE TABLE IF NOT EXISTS search_state (
+#             id INTEGER PRIMARY KEY,
+#             location TEXT,
+#             term TEXT,
+#             offset INTEGER,
+#             is_complete INTEGER
+#         )
+#     ''')
+#     connection.commit()
+
 def create_state_table(connection):
-    cursor = connection.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS search_state (
-            id INTEGER PRIMARY KEY,
-            location TEXT,
-            term TEXT,
-            offset INTEGER,
-            is_complete INTEGER
-        )
-    ''')
-    connection.commit()
+  cursor = connection.cursor()
+  cursor.execute('''
+      CREATE TABLE IF NOT EXISTS search_state (
+          location TEXT,
+          term TEXT,
+          offset INTEGER,
+          is_complete INTEGER,
+          PRIMARY KEY (location, term)
+      )
+  ''')
+  connection.commit()
 
 def save_search_state(connection, location, term, offset, is_complete):
-    cursor = connection.cursor()
-    cursor.execute('''
-        REPLACE INTO search_state (location, term, offset, is_complete)
-        VALUES (?, ?, ?, ?)
-    ''', (location, term, offset, is_complete))
-    connection.commit()
+  cursor = connection.cursor()
+  cursor.execute('''
+      INSERT OR REPLACE INTO search_state (location, term, offset, is_complete)
+      VALUES (?, ?, ?, ?)
+  ''', (location, term, offset, is_complete))
+  connection.commit()
+
+
+# def save_search_state(connection, location, term, offset, is_complete):
+#     cursor = connection.cursor()
+#     cursor.execute('''
+#         REPLACE INTO search_state (location, term, offset, is_complete)
+#         VALUES (?, ?, ?, ?)
+#     ''', (location, term, offset, is_complete))
+#     connection.commit()
 
 def load_search_state(connection, location, term):
     cursor = connection.cursor()
@@ -118,7 +140,9 @@ def yelp_location_search(location: str, term = None, offset = 0) -> pandas.DataF
   limit = MAX_LIMIT
   total_count = running_count + limit
 
-  while running_count + limit <= MAX_RESULTS and running_count + limit <= total_count and limit > 0:
+  # while running_count + limit <= MAX_RESULTS and running_count + limit <= total_count and limit > 0:
+  while running_count < total_count and limit > 0:
+
     if running_count == 0:
       print(f"\tGetting first {limit} results for {location}...")
     else:
@@ -146,7 +170,15 @@ def yelp_location_search(location: str, term = None, offset = 0) -> pandas.DataF
         results_df["_page_url"] = page_url
         page_dfs.append(results_df)
 
-        limit = MAX_LIMIT if running_count + MAX_LIMIT <= min(total_count, MAX_RESULTS) else min(total_count, MAX_RESULTS) - running_count
+        # Update offset for the next page
+        # running_count += page_count
+        offset += page_count
+
+        # Update limit for the next page
+        limit = min(MAX_LIMIT, total_count - running_count)
+
+
+        # limit = MAX_LIMIT if running_count + MAX_LIMIT <= min(total_count, MAX_RESULTS) else min(total_count, MAX_RESULTS) - running_count
 
     else:
       print(f"\tERROR! Got response status {response.status_code}: {response.reason}")
@@ -229,8 +261,12 @@ if __name__ == '__main__':
         search_state = load_search_state(connection, location, term_filter)
         if search_state:
           offset = search_state['offset']
+          is_complete = search_state['is_complete']
         else:
           offset = 0
+          is_complete = 0
+
+        # print(offset, is_complete, location, term_filter)
 
         # Check whether we've already loaded results
         try:
@@ -246,12 +282,12 @@ if __name__ == '__main__':
         except Exception as e:
           loaded_data = pandas.DataFrame()
 
-        if loaded_data.empty:
+        if loaded_data.empty and is_complete == 0:
 
           # Fetch results from the API using the current offset
           yelp_data, total_count = yelp_location_search(location=location, term=term, offset=offset)
           
-          print(yelp_data)
+          # print(yelp_data)
 
           cols_with_dicts = columns_with_dicts(yelp_data)
 
@@ -272,8 +308,8 @@ if __name__ == '__main__':
             connection.commit()
 
             # Update offset and is_complete based on the results
-            is_complete = False
-            
+            # is_complete = False
+
             if offset + len(yelp_data) >= total_count: #len(yelp_data) == 0:
               is_complete = True
             else:

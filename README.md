@@ -19,3 +19,6 @@ config.py
 SQLALCHEMY_DATABASE_URI = "sqlite:///yelp.db"
 YELP_API_KEY = "<my_api_key>"
 ```
+
+# Run Order
+If running notebooks in this repo, you may want to run scraper.ipynb before the rest as data from this notebook is used for the others.

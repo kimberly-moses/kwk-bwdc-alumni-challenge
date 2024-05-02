@@ -2,3 +2,5 @@ pandas
 requests
 zipcodes
 SQLAlchemy
+bs4
+pickleshare
